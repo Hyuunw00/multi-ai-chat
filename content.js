@@ -1,4 +1,5 @@
 // 사이트 화면이 바뀌어 전송이나 답변 표시가 안 되면 여기 선택자를 고친다.
+// send(전송 버튼)가 없거나 못 찾으면 입력창에서 Enter 키로 전송한다.
 const SITES = {
   'chatgpt.com': {
     input: '#prompt-textarea',
@@ -7,7 +8,6 @@ const SITES = {
   },
   'gemini.google.com': {
     input: 'rich-textarea .ql-editor',
-    send: 'button.send-button',
     answer: 'model-response message-content',
   },
   'claude.ai': {
@@ -65,27 +65,45 @@ function reportAnswer() {
   chrome.runtime.sendMessage({ site: location.hostname, html, slot: answerSlot });
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const inputText = (input) => (input?.value ?? input?.innerText ?? '').trim();
+
+const currentInput = () => document.querySelector(site.input);
+
 async function send(prompt) {
-  const input = document.querySelector(site.input);
-  if (!input) {
-    console.warn('[Multi AI Chat] 입력창을 찾지 못함:', site.input);
+  // 1) 입력: 사이트를 막 불러온 직후에는 입력창이 없거나 아직 동작하지 않을 수 있으므로,
+  //    글이 실제로 들어갈 때까지 다시 시도한다.
+  for (let attempt = 0; attempt < 30 && !inputText(currentInput()); attempt++) {
+    if (currentInput()) insert(currentInput(), prompt);
+    await sleep(300); // 입력이 반영된 뒤에야 전송 버튼이 활성화된다.
+  }
+  if (!inputText(currentInput())) {
+    console.warn('[Multi AI Chat] 입력하지 못함:', site.input);
     return;
   }
-  input.focus();
 
+  // 2) 전송: 입력창이 비워지면 전송된 것이다. 3초 안에 비워지지 않으면 다시 누른다.
+  //    전송된 뒤에는 다시 입력하거나 누르지 않는다 (답변 생성 중에 누르면 중복 전송되거나 생성이 멈춘다).
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const button = site.send && document.querySelector(site.send);
+    if (button) {
+      button.click();
+    } else {
+      currentInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+    }
+    for (let check = 0; check < 10; check++) {
+      await sleep(300);
+      if (!inputText(currentInput())) return;
+    }
+  }
+  console.warn('[Multi AI Chat] 전송하지 못함:', site.send ?? 'Enter');
+}
+
+function insert(input, prompt) {
+  input.focus();
   const data = new DataTransfer();
   data.setData('text/plain', prompt);
   const paste = new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true });
   // 에디터가 붙여넣기를 처리하지 않았으면 직접 입력한다.
   if (input.dispatchEvent(paste)) document.execCommand('insertText', false, prompt);
-
-  // 입력이 반영된 뒤에야 전송 버튼이 활성화된다.
-  await new Promise((resolve) => setTimeout(resolve, 300));
-
-  const button = document.querySelector(site.send);
-  if (button) {
-    button.click();
-  } else {
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
-  }
 }
