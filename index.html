@@ -91,7 +91,9 @@
     textarea { flex: 1; box-sizing: border-box; max-height: 200px; padding: 7px 0; font: inherit; font-size: 15px; color: inherit; background: none; border: 0; outline: 0; resize: none; }
     #send { width: 36px; height: 36px; padding: 0; font-size: 18px; color: var(--accent-text); background: var(--accent); border-radius: 50%; }
     #send:disabled { opacity: .25; cursor: default; }
-    .hint { margin: 6px 0 0; font-size: 12px; text-align: center; color: var(--muted); }
+    .hint { display: flex; justify-content: center; align-items: center; gap: 16px; margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+    .hint label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+    .hint input { margin: 0; accent-color: var(--accent); }
   </style>
 </head>
 <body>
@@ -128,7 +130,10 @@
       <textarea id="prompt" rows="1" placeholder="세 AI에게 동시에 물어보기" autofocus></textarea>
       <button id="send" aria-label="전송" disabled>↑</button>
     </div>
-    <p class="hint">Enter 전송 · Shift+Enter 줄바꿈</p>
+    <p class="hint">
+      <label><input type="checkbox" id="new-session"> 질문마다 새 대화로 시작</label>
+      <span>Enter 전송 · Shift+Enter 줄바꿈</span>
+    </p>
   </form>
   <script type="module" src="page.js"></script>
 </body>

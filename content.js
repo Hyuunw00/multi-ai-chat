@@ -45,6 +45,9 @@ if (site && location.ancestorOrigins[0] === extensionOrigin) {
       reportAnswer();
     }, 300);
   }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+
+  // 새 대화로 다시 불러온 경우, 확장 페이지가 이 신호를 받고 대기 중인 프롬프트를 보낸다.
+  chrome.runtime.sendMessage({ site: location.hostname, ready: true });
 }
 
 function reportAnswer() {

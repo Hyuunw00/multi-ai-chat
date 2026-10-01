@@ -40,8 +40,10 @@ await chrome.declarativeNetRequest.updateSessionRules({
 
 const frames = document.getElementById('frames');
 const answers = document.getElementById('answers');
-// hostname → { name, color, body }. body는 그 사이트의 답변이 들어가는 요소.
+// hostname → { name, color, url, iframe, body }. body는 그 사이트의 답변이 들어가는 요소.
 const columns = {};
+// 새 대화로 다시 불러오는 중인 사이트에 보낼 프롬프트. 사이트가 준비됐다고 알려오면 보낸다.
+const pendingPrompts = {};
 
 function enableCopy(copy, body) {
   copy.addEventListener('click', async () => {
@@ -75,7 +77,7 @@ for (const { name, url, color } of SITES) {
   header.append(title, copy);
   column.append(header, body);
   document.getElementById('columns').append(column);
-  columns[new URL(url).hostname] = { name, color, body };
+  columns[new URL(url).hostname] = { name, color, url, iframe, body };
 }
 
 const answeredColumns = () => Object.values(columns).filter(({ body }) => body.parentElement.dataset.state === 'answer');
@@ -85,9 +87,14 @@ const synthesisBody = synthesis.querySelector('.answer');
 const synthesize = document.getElementById('synthesize');
 enableCopy(synthesis.querySelector('.copy'), synthesisBody);
 
-// content.js가 스트리밍 중인 답변 HTML을 보내온다. slot이 'synthesis'면 종합 칸에 표시한다.
-chrome.runtime.onMessage.addListener(({ site, html, slot }, sender) => {
+// content.js가 준비 신호(ready) 또는 스트리밍 중인 답변 HTML을 보내온다. slot이 'synthesis'면 종합 칸에 표시한다.
+chrome.runtime.onMessage.addListener(({ site, ready, html, slot }, sender) => {
   if (sender.tab?.id !== tab.id) return;
+  if (ready) {
+    if (pendingPrompts[site]) chrome.tabs.sendMessage(tab.id, { prompt: pendingPrompts[site], target: site, slot: 'answer' });
+    delete pendingPrompts[site];
+    return;
+  }
   const body = slot === 'synthesis' ? synthesisBody : columns[site].body;
   body.parentElement.dataset.state = 'answer';
   // setHTML은 스크립트, 이벤트 핸들러, class/style 속성을 제거하고 넣는다.
@@ -99,6 +106,13 @@ chrome.runtime.onMessage.addListener(({ site, html, slot }, sender) => {
 const form = document.getElementById('form');
 const promptInput = document.getElementById('prompt');
 const question = document.getElementById('question');
+
+// 질문마다 새 대화로 시작할지. 꺼져 있으면 각 사이트의 같은 대화에 이어서 묻는다.
+const newSession = document.getElementById('new-session');
+newSession.checked = localStorage.getItem('newSession') === 'true';
+newSession.addEventListener('change', () => localStorage.setItem('newSession', newSession.checked));
+// 이 화면에서 이미 질문을 보냈는지. 첫 질문은 사이트가 이미 새 대화 상태라 다시 불러올 필요가 없다.
+let hasConversation = false;
 
 form.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -112,8 +126,17 @@ form.addEventListener('submit', (event) => {
     body.replaceChildren();
     body.parentElement.dataset.state = 'waiting';
   }
-  // 이 탭의 모든 프레임에 있는 content.js로 전달된다.
-  chrome.tabs.sendMessage(tab.id, { prompt, slot: 'answer' });
+  if (newSession.checked && hasConversation) {
+    // 각 사이트를 처음 주소로 다시 불러와 새 대화에서 시작한다.
+    for (const [hostname, { url, iframe }] of Object.entries(columns)) {
+      pendingPrompts[hostname] = prompt;
+      iframe.src = url;
+    }
+  } else {
+    // 이 탭의 모든 프레임에 있는 content.js로 전달된다.
+    chrome.tabs.sendMessage(tab.id, { prompt, slot: 'answer' });
+  }
+  hasConversation = true;
   promptInput.value = '';
   promptInput.dispatchEvent(new Event('input'));
   // content.js가 각 사이트 입력창에 포커스를 주므로, 전송이 끝난 뒤 다시 가져온다.
