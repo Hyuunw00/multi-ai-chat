@@ -40,10 +40,23 @@ await chrome.declarativeNetRequest.updateSessionRules({
 
 const frames = document.getElementById('frames');
 const answers = document.getElementById('answers');
-// hostname → { name, color, url, iframe, body }. body는 그 사이트의 답변이 들어가는 요소.
+// hostname → { name, color, url, iframe, column, body, step, chip }.
+// body는 그 사이트의 답변이 들어가는 요소, column은 body를 감싼 칸.
 const columns = {};
 // 새 대화로 다시 불러오는 중인 사이트에 보낼 프롬프트. 사이트가 준비됐다고 알려오면 보낸다.
 const pendingPrompts = {};
+
+// 방식: 'synthesis'(동시에 묻고 종합) 또는 'chain'(차례로 검증하는 교차검증)
+let mode = localStorage.getItem('mode') ?? 'synthesis';
+// 사용할 AI의 hostname 목록. 교차검증은 이 순서대로 진행한다.
+let selected = JSON.parse(localStorage.getItem('selected')) ?? SITES.map(({ url }) => new URL(url).hostname);
+// 진행 중인 교차검증. step은 지금 답변을 받고 있는 selected의 인덱스.
+let chain = null;
+
+// targets에 든 사이트의 content.js가 프롬프트를 입력하고 전송한다.
+function sendTo(targets, prompt, slot) {
+  chrome.tabs.sendMessage(tab.id, { prompt, targets, slot });
+}
 
 function enableCopy(copy, body) {
   copy.addEventListener('click', async () => {
@@ -54,19 +67,23 @@ function enableCopy(copy, body) {
 }
 
 for (const { name, url, color } of SITES) {
+  const hostname = new URL(url).hostname;
+
   const iframe = document.createElement('iframe');
   iframe.src = url;
   iframe.allow = 'clipboard-write';
   frames.append(iframe);
 
-  // data-state: empty(전송 전) → waiting(답변 대기) → answer(답변 표시)
+  // data-state: empty(전송 전) → queued(교차검증에서 앞 단계 대기) → waiting(답변 대기) → answer(답변 표시)
   const column = document.createElement('section');
   column.className = 'column';
   column.dataset.state = 'empty';
   column.style.setProperty('--brand', color);
   const header = document.createElement('header');
   const title = document.createElement('h2');
-  title.textContent = name;
+  const step = document.createElement('span');
+  step.className = 'step';
+  title.append(name, step);
   const copy = document.createElement('button');
   copy.type = 'button';
   copy.className = 'copy';
@@ -77,22 +94,85 @@ for (const { name, url, color } of SITES) {
   header.append(title, copy);
   column.append(header, body);
   document.getElementById('columns').append(column);
-  columns[new URL(url).hostname] = { name, color, url, iframe, body };
+
+  // 사용할 AI를 켜고 끄는 버튼. 끈 AI를 다시 켜면 순서의 맨 뒤로 간다.
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'chip';
+  chip.style.setProperty('--brand', color);
+  const order = document.createElement('span');
+  order.className = 'order';
+  chip.append(name, order);
+  chip.addEventListener('click', () => {
+    if (!selected.includes(hostname)) selected.push(hostname);
+    else if (selected.length > 1) selected = selected.filter((other) => other !== hostname);
+    localStorage.setItem('selected', JSON.stringify(selected));
+    applySettings();
+  });
+  document.getElementById('ai-chips').append(chip);
+
+  columns[hostname] = { name, color, url, iframe, column, body, step, chip };
 }
 
-const answeredColumns = () => Object.values(columns).filter(({ body }) => body.parentElement.dataset.state === 'answer');
+const judge = document.getElementById('judge');
+judge.addEventListener('change', () => localStorage.setItem('judge', judge.value));
+
+const modeButtons = {
+  synthesis: document.getElementById('mode-synthesis'),
+  chain: document.getElementById('mode-chain'),
+};
+for (const [value, button] of Object.entries(modeButtons)) {
+  button.addEventListener('click', () => {
+    mode = value;
+    localStorage.setItem('mode', mode);
+    applySettings();
+  });
+}
+
+// 방식과 AI 선택을 화면에 반영한다. 설정이 바뀌면 진행 중이던 교차검증은 멈춘다.
+function applySettings() {
+  chain = null;
+  document.body.dataset.mode = mode;
+  for (const [value, button] of Object.entries(modeButtons)) button.setAttribute('aria-pressed', value === mode);
+
+  for (const [hostname, { iframe, column, step, chip }] of Object.entries(columns)) {
+    const index = selected.indexOf(hostname);
+    const isLast = index === selected.length - 1;
+    chip.setAttribute('aria-pressed', index !== -1);
+    chip.querySelector('.order').textContent = index === -1 ? '' : index + 1;
+    // 칸과 사이트 화면은 선택된 것만, 선택한 순서대로 보여준다.
+    for (const element of [chip, column, iframe]) element.style.order = index === -1 ? SITES.length : index;
+    column.hidden = iframe.hidden = index === -1;
+    column.classList.toggle('final', isLast && selected.length > 1);
+    step.textContent = isLast && selected.length > 1 ? '최종' : `${index + 1}단계`;
+  }
+
+  // 종합 담당은 선택된 AI 중에서 고른다. 기본값은 Gemini.
+  judge.replaceChildren(...selected.map((hostname) => new Option(columns[hostname].name, hostname)));
+  const preferred = localStorage.getItem('judge') ?? 'gemini.google.com';
+  judge.value = selected.includes(preferred) ? preferred : selected[0];
+}
+applySettings();
+
+const answeredColumns = () => selected.map((hostname) => columns[hostname]).filter(({ column }) => column.dataset.state === 'answer');
 
 const synthesis = document.getElementById('synthesis');
 const synthesisBody = synthesis.querySelector('.answer');
 const synthesize = document.getElementById('synthesize');
 enableCopy(synthesis.querySelector('.copy'), synthesisBody);
 
-// content.js가 준비 신호(ready) 또는 스트리밍 중인 답변 HTML을 보내온다. slot이 'synthesis'면 종합 칸에 표시한다.
-chrome.runtime.onMessage.addListener(({ site, ready, html, slot }, sender) => {
+// content.js가 보내오는 것: 준비 신호(ready), 스트리밍 중인 답변(html), 답변 완료 신호(done).
+// slot이 'synthesis'면 종합 칸에 표시한다.
+chrome.runtime.onMessage.addListener(({ site, ready, done, html, slot }, sender) => {
   if (sender.tab?.id !== tab.id) return;
   if (ready) {
-    if (pendingPrompts[site]) chrome.tabs.sendMessage(tab.id, { prompt: pendingPrompts[site], target: site, slot: 'answer' });
+    if (pendingPrompts[site]) sendTo([site], pendingPrompts[site], 'answer');
     delete pendingPrompts[site];
+    return;
+  }
+  if (done) {
+    // 교차검증: 지금 단계의 답변이 끝나면 다음 AI에게 넘긴다.
+    if (chain && slot === 'answer' && site === selected[chain.step]) advanceChain();
     return;
   }
   const body = slot === 'synthesis' ? synthesisBody : columns[site].body;
@@ -122,19 +202,22 @@ form.addEventListener('submit', (event) => {
   document.getElementById('question-bar').hidden = false;
   synthesis.hidden = true;
   synthesize.disabled = true;
-  for (const { body } of Object.values(columns)) {
-    body.replaceChildren();
-    body.parentElement.dataset.state = 'waiting';
+
+  // 종합은 선택한 AI 모두에게, 교차검증은 첫 번째 AI에게만 먼저 보낸다.
+  chain = mode === 'chain' ? { step: 0 } : null;
+  const targets = chain ? [selected[0]] : selected;
+  for (const hostname of selected) {
+    columns[hostname].body.replaceChildren();
+    columns[hostname].column.dataset.state = targets.includes(hostname) ? 'waiting' : 'queued';
   }
+
+  for (const hostname of Object.keys(pendingPrompts)) delete pendingPrompts[hostname];
   if (newSession.checked && hasConversation) {
     // 각 사이트를 처음 주소로 다시 불러와 새 대화에서 시작한다.
-    for (const [hostname, { url, iframe }] of Object.entries(columns)) {
-      pendingPrompts[hostname] = prompt;
-      iframe.src = url;
-    }
+    for (const hostname of selected) columns[hostname].iframe.src = columns[hostname].url;
+    for (const hostname of targets) pendingPrompts[hostname] = prompt;
   } else {
-    // 이 탭의 모든 프레임에 있는 content.js로 전달된다.
-    chrome.tabs.sendMessage(tab.id, { prompt, slot: 'answer' });
+    sendTo(targets, prompt, 'answer');
   }
   hasConversation = true;
   promptInput.value = '';
@@ -158,11 +241,32 @@ promptInput.addEventListener('input', () => {
   promptInput.style.height = `${promptInput.scrollHeight}px`;
 });
 
-// 종합 담당 AI. 한 번 고르면 다음에도 유지한다.
-const judge = document.getElementById('judge');
-for (const [hostname, { name }] of Object.entries(columns)) judge.add(new Option(name, hostname));
-judge.value = localStorage.getItem('judge') ?? 'gemini.google.com';
-judge.addEventListener('change', () => localStorage.setItem('judge', judge.value));
+function advanceChain() {
+  const previous = columns[selected[chain.step]];
+  chain.step += 1;
+  const hostname = selected[chain.step];
+  if (!hostname) {
+    chain = null;
+    return;
+  }
+  columns[hostname].column.dataset.state = 'waiting';
+  sendTo([hostname], chainPrompt(previous, chain.step === selected.length - 1), 'answer');
+}
+
+function chainPrompt(previous, isLast) {
+  return [
+    `아래는 같은 질문에 대한 ${previous.name}의 답변이다. 이 답변을 검증하고 보완해줘.`,
+    `[질문]\n${question.textContent}`,
+    `[${previous.name}의 답변]\n${previous.body.innerText.trim()}`,
+    [
+      '아래 형식 그대로, 군더더기 없이 한국어로 답해줘.',
+      `## ${isLast ? '최종 답변' : '보완한 답변'}`,
+      '아래의 검증을 반영해, 질문에 대한 완성된 답변을 처음부터 다시 작성.',
+      '## 바로잡은 점',
+      `${previous.name}의 답변에서 틀렸거나 근거가 약하거나 빠져서 고친 부분을 불릿으로. 없으면 "없음".`,
+    ].join('\n'),
+  ].join('\n\n');
+}
 
 function synthesisPrompt(sources) {
   const names = sources.map(({ name }) => name).join(', ');
@@ -198,7 +302,7 @@ synthesize.addEventListener('click', () => {
   synthesisBody.replaceChildren();
   synthesis.dataset.state = 'waiting';
   synthesis.hidden = false;
-  chrome.tabs.sendMessage(tab.id, { prompt: synthesisPrompt(sources), target: judge.value, slot: 'synthesis' });
+  sendTo([judge.value], synthesisPrompt(sources), 'synthesis');
 });
 
 const viewButtons = {

@@ -1,19 +1,23 @@
 // 사이트 화면이 바뀌어 전송이나 답변 표시가 안 되면 여기 선택자를 고친다.
 // send(전송 버튼)가 없거나 못 찾으면 입력창에서 Enter 키로 전송한다.
+// busy는 답변을 생성하는 동안에만 화면에 있는 요소다.
 const SITES = {
   'chatgpt.com': {
     input: '#prompt-textarea',
     send: 'button[data-testid="send-button"]',
     answer: '[data-message-author-role="assistant"]',
+    busy: 'button[data-testid="stop-button"]',
   },
   'gemini.google.com': {
     input: 'rich-textarea .ql-editor',
     answer: 'model-response message-content',
+    busy: 'mat-icon[fonticon="stop"]',
   },
   'claude.ai': {
     input: 'div.ProseMirror[contenteditable="true"]',
     send: 'button[aria-label="Send message"]',
     answer: '[data-is-streaming]',
+    busy: '[data-is-streaming="true"]',
   },
 };
 
@@ -24,14 +28,16 @@ const extensionOrigin = new URL(chrome.runtime.getURL('')).origin;
 let answersBeforeSend = Infinity;
 let reportedHtml = '';
 let reportTimer = null;
+let doneTimer = null;
 // 지금 받는 답변을 확장 페이지의 어느 칸에 표시할지: 'answer'(사이트별 칸) 또는 'synthesis'(종합 칸)
 let answerSlot = 'answer';
 
 // 확장 페이지에 직접 삽입된 프레임에서만 동작한다. 일반 탭에서는 아무것도 하지 않는다.
 if (site && location.ancestorOrigins[0] === extensionOrigin) {
-  chrome.runtime.onMessage.addListener(({ prompt, target, slot }) => {
-    // 종합 요청은 target으로 지정된 사이트 한 곳에만 보낸다.
-    if (target && target !== location.hostname) return;
+  chrome.runtime.onMessage.addListener(({ prompt, targets, slot }) => {
+    // 메시지는 탭의 모든 프레임에 오므로, targets에 들어 있는 사이트만 처리한다.
+    if (!targets.includes(location.hostname)) return;
+    clearTimeout(doneTimer);
     answerSlot = slot;
     answersBeforeSend = document.querySelectorAll(site.answer).length;
     reportedHtml = '';
@@ -66,6 +72,17 @@ function reportAnswer() {
   if (html === reportedHtml) return;
   reportedHtml = html;
   chrome.runtime.sendMessage({ site: location.hostname, html, slot: answerSlot });
+  // 답변이 3초 동안 바뀌지 않고 생성 중 표시도 없으면 끝난 것으로 본다.
+  clearTimeout(doneTimer);
+  doneTimer = setTimeout(reportDone, 3000);
+}
+
+function reportDone() {
+  if (document.querySelector(site.busy)) {
+    doneTimer = setTimeout(reportDone, 1000);
+    return;
+  }
+  chrome.runtime.sendMessage({ site: location.hostname, done: true, slot: answerSlot });
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
