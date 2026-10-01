@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Multi AI Chat",
+  "version": "0.1.0",
+  "description": "프롬프트 하나를 ChatGPT, Gemini, Claude에 동시에 보내고 한 화면에서 비교한다.",
+  "action": { "default_title": "Multi AI Chat 열기" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["declarativeNetRequestWithHostAccess", "storage"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://gemini.google.com/*",
+    "https://claude.ai/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*"
+      ],
+      "js": ["content.js"],
+      "all_frames": true
+    }
+  ]
+}
