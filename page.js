@@ -58,6 +58,29 @@ function sendTo(targets, prompt, slot) {
   chrome.tabs.sendMessage(tab.id, { prompt, targets, slot });
 }
 
+// 로그인 페이지는 iframe 안에서 열리지 않으므로 사이트를 새 탭으로 연다.
+function openForLogin(urls) {
+  for (const url of urls) chrome.tabs.create({ url });
+  // 로그인하고 이 탭으로 돌아오면 iframe에 로그인 상태가 반영되도록 다시 불러온다.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') location.reload();
+  });
+}
+
+// 사이트에 질문을 보낼 수 없을 때(대개 로그아웃 상태) 칸에 이유와 로그인 버튼을 보여준다.
+function showBlocked(body, site) {
+  const { name, url } = columns[site];
+  const message = document.createElement('p');
+  message.textContent = `${name}에 질문을 보낼 수 없습니다. 로그인이 필요할 수 있습니다.`;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'ghost';
+  button.textContent = `${name} 열어서 로그인`;
+  button.addEventListener('click', () => openForLogin([url]));
+  body.replaceChildren(message, button);
+  body.parentElement.dataset.state = 'blocked';
+}
+
 function enableCopy(copy, body) {
   copy.addEventListener('click', async () => {
     await navigator.clipboard.writeText(body.innerText);
@@ -75,6 +98,7 @@ for (const { name, url, color } of SITES) {
   frames.append(iframe);
 
   // data-state: empty(전송 전) → queued(교차검증에서 앞 단계 대기) → waiting(답변 대기) → answer(답변 표시)
+  // blocked는 사이트에 질문을 보낼 수 없는 상태.
   const column = document.createElement('section');
   column.className = 'column';
   column.dataset.state = 'empty';
@@ -161,10 +185,23 @@ const synthesisBody = synthesis.querySelector('.answer');
 const synthesize = document.getElementById('synthesize');
 enableCopy(synthesis.querySelector('.copy'), synthesisBody);
 
-// content.js가 보내오는 것: 준비 신호(ready), 스트리밍 중인 답변(html), 답변 완료 신호(done).
-// slot이 'synthesis'면 종합 칸에 표시한다.
-chrome.runtime.onMessage.addListener(({ site, ready, done, html, slot }, sender) => {
+// content.js가 보내오는 것: 준비 신호(ready), 질문을 보낼 수 있는지(usable), 전송 실패(failed),
+// 스트리밍 중인 답변(html), 답변 완료 신호(done). slot이 'synthesis'면 종합 칸에 표시한다.
+chrome.runtime.onMessage.addListener(({ site, ready, usable, failed, done, html, slot }, sender) => {
   if (sender.tab?.id !== tab.id) return;
+  if (usable !== undefined) {
+    const { column, body } = columns[site];
+    if (!usable && column.dataset.state !== 'answer') showBlocked(body, site);
+    if (usable && column.dataset.state === 'blocked') {
+      body.replaceChildren();
+      column.dataset.state = 'empty';
+    }
+    return;
+  }
+  if (failed) {
+    showBlocked(slot === 'synthesis' ? synthesisBody : columns[site].body, site);
+    return;
+  }
   if (ready) {
     if (pendingPrompts[site]) sendTo([site], pendingPrompts[site], 'answer');
     delete pendingPrompts[site];
@@ -316,11 +353,4 @@ for (const [view, button] of Object.entries(viewButtons)) {
   });
 }
 
-// 로그인 페이지는 iframe 안에서 열리지 않으므로 세 사이트를 새 탭으로 연다.
-document.getElementById('login').addEventListener('click', () => {
-  for (const { url } of SITES) chrome.tabs.create({ url });
-  // 로그인하고 이 탭으로 돌아오면 iframe에 로그인 상태가 반영되도록 다시 불러온다.
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') location.reload();
-  });
-});
+document.getElementById('login').addEventListener('click', () => openForLogin(SITES.map(({ url }) => url)));

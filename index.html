@@ -78,6 +78,10 @@
     .answer { flex: 1; overflow: auto; padding: 4px 16px 16px; font-size: 15px; line-height: 1.65; overflow-wrap: anywhere; }
     .column[data-state="empty"] .answer::before { content: '프롬프트를 보내면 답변이 여기에 표시됩니다.'; display: block; margin-top: 12px; color: var(--muted); font-size: 14px; }
     .column[data-state="queued"] .answer::before { content: '앞 단계의 답변을 기다리는 중입니다.'; display: block; margin-top: 12px; color: var(--muted); font-size: 14px; }
+    .column[data-state="blocked"] .answer { padding-top: 12px; font-size: 14px; color: var(--muted); }
+    /* 답변이 오래 오지 않으면 25초 뒤에 안내를 띄운다. */
+    .column[data-state="waiting"] .answer::after { content: '답변이 늦어지면 오른쪽 위 \'사이트\'에서 로그인 상태나 오류를 확인해 보세요.'; display: block; margin-top: 16px; font-size: 13px; color: var(--muted); opacity: 0; animation: appear 0s 25s forwards; }
+    @keyframes appear { to { opacity: 1; } }
     /* 답변이 오기 전까지 보여주는 스켈레톤 3줄 */
     .column[data-state="waiting"] .answer::before {
       content: ''; display: block; height: 68px; margin-top: 16px;

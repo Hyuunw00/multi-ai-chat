@@ -24,6 +24,10 @@ const SITES = {
 const site = SITES[location.hostname];
 const extensionOrigin = new URL(chrome.runtime.getURL('')).origin;
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const inputText = (input) => (input?.value ?? input?.innerText ?? '').trim();
+const currentInput = () => document.querySelector(site.input);
+
 // 전송 시점의 답변 개수. 이보다 늘어난 뒤의 마지막 답변만 새 답변으로 보고한다.
 let answersBeforeSend = Infinity;
 let reportedHtml = '';
@@ -54,6 +58,14 @@ if (site && location.ancestorOrigins[0] === extensionOrigin) {
 
   // 새 대화로 다시 불러온 경우, 확장 페이지가 이 신호를 받고 대기 중인 프롬프트를 보낸다.
   chrome.runtime.sendMessage({ site: location.hostname, ready: true });
+  reportUsable();
+}
+
+// 입력창이 있는지로, 이 사이트에 질문을 보낼 수 있는 상태인지 알린다.
+// 로그인이 필요한 사이트는 로그아웃 상태에서 입력창이 나오지 않는다.
+async function reportUsable() {
+  for (let attempt = 0; attempt < 20 && !currentInput(); attempt++) await sleep(500);
+  chrome.runtime.sendMessage({ site: location.hostname, usable: !!currentInput() });
 }
 
 function reportAnswer() {
@@ -85,11 +97,6 @@ function reportDone() {
   chrome.runtime.sendMessage({ site: location.hostname, done: true, slot: answerSlot });
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const inputText = (input) => (input?.value ?? input?.innerText ?? '').trim();
-
-const currentInput = () => document.querySelector(site.input);
-
 async function send(prompt) {
   // 1) 입력: 사이트를 막 불러온 직후에는 입력창이 없거나 아직 동작하지 않을 수 있으므로,
   //    글이 실제로 들어갈 때까지 다시 시도한다.
@@ -99,6 +106,7 @@ async function send(prompt) {
   }
   if (!inputText(currentInput())) {
     console.warn('[Multi AI Chat] 입력하지 못함:', site.input);
+    chrome.runtime.sendMessage({ site: location.hostname, failed: true, slot: answerSlot });
     return;
   }
 
@@ -117,6 +125,7 @@ async function send(prompt) {
     }
   }
   console.warn('[Multi AI Chat] 전송하지 못함:', site.send ?? 'Enter');
+  chrome.runtime.sendMessage({ site: location.hostname, failed: true, slot: answerSlot });
 }
 
 function insert(input, prompt) {
