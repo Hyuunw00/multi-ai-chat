@@ -75,6 +75,9 @@ function reportAnswer() {
   const answers = document.querySelectorAll(site.answer);
   if (answers.length <= answersBeforeSend) return;
   const answer = answers[answers.length - 1].cloneNode(true);
+  // 화면에는 안 보이는 스크린리더용 문구(Claude의 "Claude responded: ..." 등)는 뺀다.
+  // 확장 페이지의 setHTML이 class를 지워서 그대로 두면 보이게 된다.
+  for (const element of answer.querySelectorAll('.sr-only')) element.remove();
   // Gemini는 표와 코드블록을 커스텀 요소로 감싼다. 확장 페이지의 setHTML이 커스텀 요소를
   // 내용째 제거하므로 div로 바꿔서 보낸다.
   for (const element of answer.querySelectorAll('*')) {
