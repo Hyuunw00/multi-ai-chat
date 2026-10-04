@@ -35,14 +35,17 @@ let reportTimer = null;
 let doneTimer = null;
 // 지금 받는 답변을 확장 페이지의 어느 칸에 표시할지: 'answer'(사이트별 칸) 또는 'synthesis'(종합 칸)
 let answerSlot = 'answer';
+// 확장 페이지가 전송마다 붙이는 번호. 보고에 함께 실어 보내 이전 전송의 보고를 걸러낼 수 있게 한다.
+let sendId = null;
 
 // 확장 페이지에 직접 삽입된 프레임에서만 동작한다. 일반 탭에서는 아무것도 하지 않는다.
 if (site && location.ancestorOrigins[0] === extensionOrigin) {
-  chrome.runtime.onMessage.addListener(({ prompt, targets, slot }) => {
+  chrome.runtime.onMessage.addListener(({ prompt, targets, slot, id }) => {
     // 메시지는 탭의 모든 프레임에 오므로, targets에 들어 있는 사이트만 처리한다.
     if (!targets.includes(location.hostname)) return;
     clearTimeout(doneTimer);
     answerSlot = slot;
+    sendId = id;
     answersBeforeSend = document.querySelectorAll(site.answer).length;
     reportedHtml = '';
     send(prompt);
@@ -83,7 +86,7 @@ function reportAnswer() {
   const html = answer.innerHTML;
   if (html === reportedHtml) return;
   reportedHtml = html;
-  chrome.runtime.sendMessage({ site: location.hostname, html, slot: answerSlot });
+  chrome.runtime.sendMessage({ site: location.hostname, html, slot: answerSlot, id: sendId });
   // 답변이 3초 동안 바뀌지 않고 생성 중 표시도 없으면 끝난 것으로 본다.
   clearTimeout(doneTimer);
   doneTimer = setTimeout(reportDone, 3000);
@@ -94,7 +97,7 @@ function reportDone() {
     doneTimer = setTimeout(reportDone, 1000);
     return;
   }
-  chrome.runtime.sendMessage({ site: location.hostname, done: true, slot: answerSlot });
+  chrome.runtime.sendMessage({ site: location.hostname, done: true, slot: answerSlot, id: sendId });
 }
 
 async function send(prompt) {
@@ -106,7 +109,7 @@ async function send(prompt) {
   }
   if (!inputText(currentInput())) {
     console.warn('[Multi AI Chat] 입력하지 못함:', site.input);
-    chrome.runtime.sendMessage({ site: location.hostname, failed: true, slot: answerSlot });
+    chrome.runtime.sendMessage({ site: location.hostname, failed: true, slot: answerSlot, id: sendId });
     return;
   }
 
@@ -125,7 +128,7 @@ async function send(prompt) {
     }
   }
   console.warn('[Multi AI Chat] 전송하지 못함:', site.send ?? 'Enter');
-  chrome.runtime.sendMessage({ site: location.hostname, failed: true, slot: answerSlot });
+  chrome.runtime.sendMessage({ site: location.hostname, failed: true, slot: answerSlot, id: sendId });
 }
 
 function insert(input, prompt) {

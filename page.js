@@ -53,9 +53,16 @@ let selected = JSON.parse(localStorage.getItem('selected')) ?? SITES.map(({ url 
 // 진행 중인 교차검증. step은 지금 답변을 받고 있는 selected의 인덱스.
 let chain = null;
 
+// 사이트·칸별로 지금 기다리는 전송 번호. 'hostname:slot' → id.
+// 번호가 다른 보고(이전 질문의 답변 등)는 무시한다.
+const expectedIds = {};
+let lastSendId = 0;
+
 // targets에 든 사이트의 content.js가 프롬프트를 입력하고 전송한다.
 function sendTo(targets, prompt, slot) {
-  chrome.tabs.sendMessage(tab.id, { prompt, targets, slot });
+  const id = ++lastSendId;
+  for (const site of targets) expectedIds[`${site}:${slot}`] = id;
+  chrome.tabs.sendMessage(tab.id, { prompt, targets, slot, id });
 }
 
 // 로그인 페이지는 iframe 안에서 열리지 않으므로 사이트를 새 탭으로 연다.
@@ -187,7 +194,7 @@ enableCopy(synthesis.querySelector('.copy'), synthesisBody);
 
 // content.js가 보내오는 것: 준비 신호(ready), 질문을 보낼 수 있는지(usable), 전송 실패(failed),
 // 스트리밍 중인 답변(html), 답변 완료 신호(done). slot이 'synthesis'면 종합 칸에 표시한다.
-chrome.runtime.onMessage.addListener(({ site, ready, usable, failed, done, html, slot }, sender) => {
+chrome.runtime.onMessage.addListener(({ site, ready, usable, failed, done, html, slot, id }, sender) => {
   if (sender.tab?.id !== tab.id) return;
   if (usable !== undefined) {
     const { column, body } = columns[site];
@@ -198,13 +205,16 @@ chrome.runtime.onMessage.addListener(({ site, ready, usable, failed, done, html,
     }
     return;
   }
-  if (failed) {
-    showBlocked(slot === 'synthesis' ? synthesisBody : columns[site].body, site);
-    return;
-  }
   if (ready) {
     if (pendingPrompts[site]) sendTo([site], pendingPrompts[site], 'answer');
     delete pendingPrompts[site];
+    return;
+  }
+  // 지금 기다리는 전송의 보고가 아니면 버린다. 새 대화를 불러오는 동안 이전 화면이
+  // 이전 답변을 다시 보내거나, 교차검증에서 대기 중인 칸에 이전 답변이 들어오는 것을 막는다.
+  if (expectedIds[`${site}:${slot}`] !== id) return;
+  if (failed) {
+    showBlocked(slot === 'synthesis' ? synthesisBody : columns[site].body, site);
     return;
   }
   if (done) {
@@ -249,9 +259,16 @@ form.addEventListener('submit', (event) => {
   }
 
   for (const hostname of Object.keys(pendingPrompts)) delete pendingPrompts[hostname];
+  for (const key of Object.keys(expectedIds)) delete expectedIds[key];
   if (newSession.checked && hasConversation) {
-    // 각 사이트를 처음 주소로 다시 불러와 새 대화에서 시작한다.
-    for (const hostname of selected) columns[hostname].iframe.src = columns[hostname].url;
+    // 각 사이트를 새 iframe으로 바꿔 새 대화에서 시작한다. src만 바꾸면 새 화면이 뜰 때까지
+    // 이전 화면이 남아 있고, 불러오기가 늦거나 실패하면 이전 대화에 그대로 머문다.
+    for (const hostname of selected) {
+      const fresh = columns[hostname].iframe.cloneNode();
+      fresh.src = columns[hostname].url;
+      columns[hostname].iframe.replaceWith(fresh);
+      columns[hostname].iframe = fresh;
+    }
     for (const hostname of targets) pendingPrompts[hostname] = prompt;
   } else {
     sendTo(targets, prompt, 'answer');
