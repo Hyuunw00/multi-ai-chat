@@ -38,6 +38,8 @@
     /* 순서 번호와 단계 표시는 교차검증에서만 보인다. */
     .order, .step { padding: 0 6px; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--subtle); border-radius: 999px; }
     body:not([data-mode="chain"]) :is(.order, .step), .order:empty { display: none; }
+    #history { max-width: 280px; padding: 4px 6px; font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: 7px; }
+    #history-tag { flex: none; padding: 1px 8px; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--card); border-radius: 999px; }
     body[data-mode="chain"] :is(.judge, #synthesize) { display: none; }
 
     main { flex: 1; position: relative; min-height: 0; }
@@ -71,6 +73,10 @@
     .copy { font-size: 12px; color: var(--muted); }
     .copy:hover { color: var(--text); background: var(--subtle); }
     .column:not([data-state="answer"]) .copy { visibility: hidden; }
+    /* 교차검증에서는 칸 사이에 다음 단계로 넘어가는 화살표를 보여준다. */
+    body[data-mode="chain"] #columns { gap: 36px; }
+    body[data-mode="chain"] .column.has-next { position: relative; }
+    body[data-mode="chain"] .column.has-next::after { content: '→'; position: absolute; top: 50%; left: 100%; width: 36px; font-size: 22px; line-height: 1; text-align: center; color: var(--muted); transform: translateY(-50%); }
     /* 교차검증의 마지막 단계 칸 */
     body[data-mode="chain"] .column.final { border-color: var(--muted); }
     body[data-mode="chain"] .column.final .step { color: var(--accent-text); background: var(--accent); }
@@ -122,6 +128,7 @@
         <button type="button" id="mode-chain" title="첫 AI의 답변을 다음 AI가 차례로 검증·보완합니다">교차검증</button>
       </div>
       <div id="ai-chips" title="눌러서 사용할 AI를 켜고 끕니다. 교차검증은 켠 순서대로 진행합니다."></div>
+      <select id="history" title="이전 질문과 그때의 답변을 다시 봅니다"></select>
     </div>
     <div class="actions">
       <div class="segmented" role="group" aria-label="화면 전환">
@@ -135,6 +142,7 @@
     <div id="frames"></div>
     <div id="answers">
       <div id="question-bar" hidden>
+        <span id="history-tag" hidden></span>
         <p id="question"></p>
         <label class="judge">종합 담당 <select id="judge"></select></label>
         <button type="button" id="synthesize" disabled>답변 종합하기</button>

@@ -57,6 +57,12 @@ let chain = null;
 // 번호가 다른 보고(이전 질문의 답변 등)는 무시한다.
 const expectedIds = {};
 let lastSendId = 0;
+// 질문 기록. 최신이 앞. 항목 = { id, prompt, mode, order, answers: {hostname: html}, synthesis: {html, judge, sources} | null }
+// current는 지금 답변을 받고 있는 기록, viewing은 화면에 보이는 기록.
+const HISTORY_LIMIT = 30;
+let history = (await chrome.storage.local.get('history')).history ?? [];
+let current = null;
+let viewing = null;
 
 // targets에 든 사이트의 content.js가 프롬프트를 입력하고 전송한다.
 function sendTo(targets, prompt, slot) {
@@ -160,28 +166,39 @@ for (const [value, button] of Object.entries(modeButtons)) {
   });
 }
 
+// 칸과 사이트 화면을 order에 든 것만, 그 순서대로 배치한다. 기록을 볼 때는 그 기록의 순서와 방식을 쓴다.
+function layoutColumns(order, layoutMode) {
+  document.body.dataset.mode = layoutMode;
+  for (const [hostname, { iframe, column, step }] of Object.entries(columns)) {
+    const index = order.indexOf(hostname);
+    const isLast = index === order.length - 1;
+    for (const element of [column, iframe]) element.style.order = index === -1 ? SITES.length : index;
+    column.hidden = iframe.hidden = index === -1;
+    column.classList.toggle('final', isLast && order.length > 1);
+    column.classList.toggle('has-next', index !== -1 && !isLast);
+    step.textContent = isLast && order.length > 1 ? '최종' : `${index + 1}단계`;
+  }
+}
+
 // 방식과 AI 선택을 화면에 반영한다. 설정이 바뀌면 진행 중이던 교차검증은 멈춘다.
 function applySettings() {
   chain = null;
-  document.body.dataset.mode = mode;
   for (const [value, button] of Object.entries(modeButtons)) button.setAttribute('aria-pressed', value === mode);
-
-  for (const [hostname, { iframe, column, step, chip }] of Object.entries(columns)) {
+  for (const [hostname, { chip }] of Object.entries(columns)) {
     const index = selected.indexOf(hostname);
-    const isLast = index === selected.length - 1;
     chip.setAttribute('aria-pressed', index !== -1);
     chip.querySelector('.order').textContent = index === -1 ? '' : index + 1;
-    // 칸과 사이트 화면은 선택된 것만, 선택한 순서대로 보여준다.
-    for (const element of [chip, column, iframe]) element.style.order = index === -1 ? SITES.length : index;
-    column.hidden = iframe.hidden = index === -1;
-    column.classList.toggle('final', isLast && selected.length > 1);
-    step.textContent = isLast && selected.length > 1 ? '최종' : `${index + 1}단계`;
+    chip.style.order = index === -1 ? SITES.length : index;
   }
+  layoutColumns(selected, mode);
 
   // 종합 담당은 선택된 AI 중에서 고른다. 기본값은 Gemini.
   judge.replaceChildren(...selected.map((hostname) => new Option(columns[hostname].name, hostname)));
   const preferred = localStorage.getItem('judge') ?? 'gemini.google.com';
   judge.value = selected.includes(preferred) ? preferred : selected[0];
+
+  // 과거 기록을 보던 중이면 화면을 비운다. 바뀐 설정의 배치와 기록의 답변이 섞이지 않게.
+  if (viewing && viewing !== current) showEmpty();
 }
 applySettings();
 
@@ -191,6 +208,85 @@ const synthesis = document.getElementById('synthesis');
 const synthesisBody = synthesis.querySelector('.answer');
 const synthesize = document.getElementById('synthesize');
 enableCopy(synthesis.querySelector('.copy'), synthesisBody);
+
+const question = document.getElementById('question');
+const questionBar = document.getElementById('question-bar');
+const historyTag = document.getElementById('history-tag');
+const historySelect = document.getElementById('history');
+const MODE_LABELS = { synthesis: '종합', chain: '교차검증' };
+
+let saveTimer = null;
+function saveHistory() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    chrome.storage.local.set({ history }).catch((error) => console.warn('[Multi AI Chat] 기록 저장 실패', error));
+  }, 500);
+}
+
+function renderHistoryOptions() {
+  historySelect.replaceChildren(
+    new Option(history.length ? `기록 ${history.length}개` : '기록 없음', ''),
+    ...history.map((entry) => {
+      const time = new Date(entry.id).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      return new Option(`${time} · ${entry.prompt.slice(0, 40)}`, String(entry.id));
+    }),
+  );
+}
+renderHistoryOptions();
+
+function renderSynthesis(entry) {
+  const data = entry.synthesis;
+  synthesis.hidden = !data;
+  if (!data) return;
+  // 어떤 답변들을 종합했는지 종합 칸 머리에 표시한다.
+  document.getElementById('sources').replaceChildren(...data.sources.map(({ name, color }) => {
+    const chip = document.createElement('span');
+    chip.className = 'source';
+    chip.style.setProperty('--brand', color);
+    chip.textContent = name;
+    return chip;
+  }));
+  document.getElementById('judge-name').textContent = `${data.judge}가 정리`;
+  synthesisBody.replaceChildren();
+  synthesis.dataset.state = data.html ? 'answer' : 'waiting';
+  if (data.html) synthesisBody.setHTML(data.html);
+}
+
+// 기록 하나를 화면에 보여준다. 지금 답변을 받고 있는 기록이면 아직 안 온 칸은 대기 표시.
+function showEntry(entry) {
+  viewing = entry;
+  historySelect.value = String(entry.id);
+  question.textContent = entry.prompt;
+  questionBar.hidden = false;
+  historyTag.hidden = entry === current;
+  historyTag.textContent = `기록 · ${MODE_LABELS[entry.mode]}`;
+  layoutColumns(entry.order, entry.mode);
+  for (const [hostname, { column, body }] of Object.entries(columns)) {
+    const html = entry.answers[hostname];
+    body.replaceChildren();
+    column.dataset.state = html ? 'answer' : entry === current ? 'waiting' : 'empty';
+    if (html) body.setHTML(html);
+  }
+  renderSynthesis(entry);
+  synthesize.disabled = entry !== current || Object.keys(entry.answers).length < 2;
+}
+
+function showEmpty() {
+  viewing = null;
+  historySelect.value = '';
+  questionBar.hidden = true;
+  synthesis.hidden = true;
+  for (const { column, body } of Object.values(columns)) {
+    body.replaceChildren();
+    column.dataset.state = 'empty';
+  }
+}
+
+historySelect.addEventListener('change', () => {
+  const entry = history.find((item) => String(item.id) === historySelect.value);
+  if (entry) showEntry(entry);
+  else showEmpty();
+});
 
 // content.js가 보내오는 것: 준비 신호(ready), 질문을 보낼 수 있는지(usable), 전송 실패(failed),
 // 스트리밍 중인 답변(html), 답변 완료 신호(done). slot이 'synthesis'면 종합 칸에 표시한다.
@@ -214,7 +310,7 @@ chrome.runtime.onMessage.addListener(({ site, ready, usable, failed, done, html,
   // 이전 답변을 다시 보내거나, 교차검증에서 대기 중인 칸에 이전 답변이 들어오는 것을 막는다.
   if (expectedIds[`${site}:${slot}`] !== id) return;
   if (failed) {
-    showBlocked(slot === 'synthesis' ? synthesisBody : columns[site].body, site);
+    if (viewing === current) showBlocked(slot === 'synthesis' ? synthesisBody : columns[site].body, site);
     return;
   }
   if (done) {
@@ -222,6 +318,12 @@ chrome.runtime.onMessage.addListener(({ site, ready, usable, failed, done, html,
     if (chain && slot === 'answer' && site === selected[chain.step]) advanceChain();
     return;
   }
+  if (!current) return;
+  // 답변은 기록에 먼저 쌓고, 그 기록을 보고 있을 때만 화면에 그린다.
+  if (slot === 'synthesis') current.synthesis.html = html;
+  else current.answers[site] = html;
+  saveHistory();
+  if (viewing !== current) return;
   const body = slot === 'synthesis' ? synthesisBody : columns[site].body;
   body.parentElement.dataset.state = 'answer';
   // setHTML은 스크립트, 이벤트 핸들러, class/style 속성을 제거하고 넣는다.
@@ -232,7 +334,6 @@ chrome.runtime.onMessage.addListener(({ site, ready, usable, failed, done, html,
 
 const form = document.getElementById('form');
 const promptInput = document.getElementById('prompt');
-const question = document.getElementById('question');
 
 // 질문마다 새 대화로 시작할지. 꺼져 있으면 각 사이트의 같은 대화에 이어서 묻는다.
 const newSession = document.getElementById('new-session');
@@ -245,10 +346,12 @@ form.addEventListener('submit', (event) => {
   event.preventDefault();
   const prompt = promptInput.value.trim();
   if (!prompt) return;
-  question.textContent = prompt;
-  document.getElementById('question-bar').hidden = false;
-  synthesis.hidden = true;
-  synthesize.disabled = true;
+  current = { id: Date.now(), prompt, mode, order: [...selected], answers: {}, synthesis: null };
+  history.unshift(current);
+  history.splice(HISTORY_LIMIT);
+  renderHistoryOptions();
+  saveHistory();
+  showEntry(current);
 
   // 종합은 선택한 AI 모두에게, 교차검증은 첫 번째 AI에게만 먼저 보낸다.
   chain = mode === 'chain' ? { step: 0 } : null;
@@ -295,29 +398,41 @@ promptInput.addEventListener('input', () => {
   promptInput.style.height = `${promptInput.scrollHeight}px`;
 });
 
+// 저장된 답변 HTML을 글로 바꾼다. innerText는 화면에 붙어 있어야 줄바꿈이 살아서 잠시 붙였다 뗀다.
+function htmlToText(html) {
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;left:-9999px;width:800px';
+  box.setHTML(html ?? '');
+  document.body.append(box);
+  const text = box.innerText.trim();
+  box.remove();
+  return text;
+}
+
 function advanceChain() {
-  const previous = columns[selected[chain.step]];
+  const previous = selected[chain.step];
   chain.step += 1;
   const hostname = selected[chain.step];
   if (!hostname) {
     chain = null;
     return;
   }
-  columns[hostname].column.dataset.state = 'waiting';
+  if (viewing === current) columns[hostname].column.dataset.state = 'waiting';
   sendTo([hostname], chainPrompt(previous, chain.step === selected.length - 1), 'answer');
 }
 
-function chainPrompt(previous, isLast) {
+function chainPrompt(previousHostname, isLast) {
+  const { name } = columns[previousHostname];
   return [
-    `아래는 같은 질문에 대한 ${previous.name}의 답변이다. 이 답변을 검증하고 보완해줘.`,
-    `[질문]\n${question.textContent}`,
-    `[${previous.name}의 답변]\n${previous.body.innerText.trim()}`,
+    `아래는 같은 질문에 대한 ${name}의 답변이다. 이 답변을 검증하고 보완해줘.`,
+    `[질문]\n${current.prompt}`,
+    `[${name}의 답변]\n${htmlToText(current.answers[previousHostname])}`,
     [
       '아래 형식 그대로, 군더더기 없이 한국어로 답해줘.',
       `## ${isLast ? '최종 답변' : '보완한 답변'}`,
       '아래의 검증을 반영해, 질문에 대한 완성된 답변을 처음부터 다시 작성.',
       '## 바로잡은 점',
-      `${previous.name}의 답변에서 틀렸거나 근거가 약하거나 빠져서 고친 부분을 불릿으로. 없으면 "없음".`,
+      `${name}의 답변에서 틀렸거나 근거가 약하거나 빠져서 고친 부분을 불릿으로. 없으면 "없음".`,
     ].join('\n'),
   ].join('\n\n');
 }
@@ -326,8 +441,8 @@ function synthesisPrompt(sources) {
   const names = sources.map(({ name }) => name).join(', ');
   return [
     `아래는 같은 질문에 대한 ${names}의 답변이다. 이 답변들을 교차 검증해서 하나로 종합해줘.`,
-    `[질문]\n${question.textContent}`,
-    ...sources.map(({ name, body }) => `[${name}의 답변]\n${body.innerText.trim()}`),
+    `[질문]\n${current.prompt}`,
+    ...sources.map(({ name, hostname }) => `[${name}의 답변]\n${htmlToText(current.answers[hostname])}`),
     [
       '아래 형식 그대로, 군더더기 없이 한국어로 답해줘.',
       '## 결론',
@@ -343,19 +458,11 @@ function synthesisPrompt(sources) {
 }
 
 synthesize.addEventListener('click', () => {
-  const sources = answeredColumns();
-  // 어떤 답변들을 종합했는지 종합 칸 머리에 표시한다.
-  document.getElementById('sources').replaceChildren(...sources.map(({ name, color }) => {
-    const chip = document.createElement('span');
-    chip.className = 'source';
-    chip.style.setProperty('--brand', color);
-    chip.textContent = name;
-    return chip;
-  }));
-  document.getElementById('judge-name').textContent = `${columns[judge.value].name}가 정리`;
-  synthesisBody.replaceChildren();
-  synthesis.dataset.state = 'waiting';
-  synthesis.hidden = false;
+  // 지금 기록에 답변이 있는 AI들을 선택 순서대로
+  const sources = selected.filter((hostname) => current.answers[hostname]).map((hostname) => ({ hostname, ...columns[hostname] }));
+  current.synthesis = { html: '', judge: columns[judge.value].name, sources: sources.map(({ name, color }) => ({ name, color })) };
+  renderSynthesis(current);
+  saveHistory();
   sendTo([judge.value], synthesisPrompt(sources), 'synthesis');
 });
 

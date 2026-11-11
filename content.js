@@ -3,7 +3,7 @@
 // busy는 답변을 생성하는 동안에만 화면에 있는 요소다.
 const SITES = {
   'chatgpt.com': {
-    input: '#prompt-textarea',
+    input: '#prompt-textarea, div.ProseMirror[contenteditable="true"]',
     send: 'button[data-testid="send-button"]',
     answer: '[data-message-author-role="assistant"]',
     busy: 'button[data-testid="stop-button"]',
